@@ -3,6 +3,8 @@ const cors = require('cors');
 const qrcode = require('qrcode');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
@@ -12,8 +14,11 @@ let qrCodeDataUrl = null;
 let isConnected = false;
 let sock = null;
 
+// Store auth files one folder UP so Hostinger doesn't restart the server
+const AUTH_DIR = path.join(__dirname, '../tbg_whatsapp_auth');
+
 async function connectToWhatsApp () {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     
     sock = makeWASocket({
         auth: state,
@@ -37,8 +42,7 @@ async function connectToWhatsApp () {
             if (shouldReconnect) {
                 connectToWhatsApp();
             } else {
-                const fs = require('fs');
-                if (fs.existsSync('auth_info_baileys')) fs.rmSync('auth_info_baileys', { recursive: true, force: true });
+                if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
                 connectToWhatsApp();
             }
         } else if (connection === 'open') {
@@ -68,6 +72,7 @@ app.post('/send', async (req, res) => {
 app.post('/logout', async (req, res) => {
     try {
         if (sock) await sock.logout();
+        if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
         res.json({ success: true });
     } catch (error) {
         res.status(500).json({ success: false, message: error.toString() });
