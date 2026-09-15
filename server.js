@@ -1,69 +1,65 @@
 const express = require('express');
-const { Client, LocalAuth } = require('whatsapp-web.js');
 const cors = require('cors');
 const qrcode = require('qrcode');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const pino = require('pino');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: { 
-        args: ['--no-sandbox', '--disable-setuid-sandbox'] 
-    }
-});
-
 let qrCodeDataUrl = null;
 let isConnected = false;
+let sock = null;
 
-client.on('qr', async (qr) => {
-    // Convert to Data URL (base64 image) so PHP can display it easily
-    qrCodeDataUrl = await qrcode.toDataURL(qr);
-    console.log('New QR Code generated');
-});
-
-client.on('ready', () => {
-    console.log('WhatsApp Client is ready!');
-    isConnected = true;
-    qrCodeDataUrl = null;
-});
-
-client.on('disconnected', () => {
-    console.log('WhatsApp Client disconnected!');
-    isConnected = false;
-    qrCodeDataUrl = null;
-    client.initialize(); // Re-initialize to get a new QR
-});
-
-client.initialize();
-
-// Endpoints
-app.get('/status', (req, res) => {
-    res.json({
-        connected: isConnected,
-        qr_url: isConnected ? null : qrCodeDataUrl
+async function connectToWhatsApp () {
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    
+    sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: false,
+        logger: pino({ level: "silent" })
     });
-});
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        
+        if (qr) {
+            qrCodeDataUrl = await qrcode.toDataURL(qr);
+        }
+        
+        if (connection === 'close') {
+            isConnected = false;
+            qrCodeDataUrl = null;
+            const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect) {
+                connectToWhatsApp();
+            } else {
+                const fs = require('fs');
+                if (fs.existsSync('auth_info_baileys')) fs.rmSync('auth_info_baileys', { recursive: true, force: true });
+                connectToWhatsApp();
+            }
+        } else if (connection === 'open') {
+            isConnected = true;
+            qrCodeDataUrl = null;
+        }
+    });
+}
+
+connectToWhatsApp();
+
+app.get('/status', (req, res) => res.json({ connected: isConnected, qr_url: isConnected ? null : qrCodeDataUrl }));
 
 app.post('/send', async (req, res) => {
-    if (!isConnected) {
-        return res.status(400).json({ success: false, message: 'WhatsApp is not connected' });
-    }
+    if (!isConnected || !sock) return res.status(400).json({ success: false, message: 'Not connected' });
     const { number, message } = req.body;
-    if (!number || !message) {
-        return res.status(400).json({ success: false, message: 'Number and message required' });
-    }
-    
     try {
-        // Strip non-numeric
         let cleanNumber = number.replace(/\D/g, '');
-        // Default to India country code if length is 10
         if (cleanNumber.length === 10) cleanNumber = '91' + cleanNumber;
-        
-        const formattedNumber = `${cleanNumber}@c.us`;
-        await client.sendMessage(formattedNumber, message);
-        res.json({ success: true, message: 'Message sent successfully' });
+        await sock.sendMessage(`${cleanNumber}@s.whatsapp.net`, { text: message });
+        res.json({ success: true });
     } catch (error) {
         res.status(500).json({ success: false, message: error.toString() });
     }
@@ -71,17 +67,12 @@ app.post('/send', async (req, res) => {
 
 app.post('/logout', async (req, res) => {
     try {
-        await client.logout();
-        isConnected = false;
-        qrCodeDataUrl = null;
-        client.initialize();
-        res.json({ success: true, message: 'Logged out successfully' });
+        if (sock) await sock.logout();
+        res.json({ success: true });
     } catch (error) {
         res.status(500).json({ success: false, message: error.toString() });
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`TBG WhatsApp API running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`API running on port ${PORT}`));
